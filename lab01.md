@@ -20,7 +20,6 @@
 
 3.执行make进行编译
 
-## 使用gbd跟踪
 
 ## 结果分析
 
@@ -28,62 +27,114 @@
 
 > set_task_stack_end_magic(&amp;init_task);
 
-这是一个关键事件，因为它通过直接给定地址启动0号进程。主体动作都在init_task中进行，通过静态方式分配内核栈
+这是一个关键事件，因为它初始化栈底信息，为启动0号进程做准备。主体动作都在init_task中进行，通过静态方式分配内核栈
 
 > rest_init();
 
 这也是个关键事件，它启动了1号进程，1号进程主要由三部分构成：
 
 *   初始化：
+```
+    static struct task_struct *copy_process(unsigned long clone_flags,
+                    unsigned long stack_start,
+                    unsigned long stack_size,
+                    int __user *child_tidptr,
+                    struct pid *pid,
+                    int trace)
+{
+   .... 
 
-    static struct task_struct *copy_process(
-                        unsigned long clone_flags,
-                        unsigned long stack_start,
-                        unsigned long stack_size,
-                        int __user *child_tidptr,
-                        struct pid *pid,
-                        int trace)
-    {
-       .... 
-        retval = security_task_create(clone_flags);
-        <span class="hljs-keyword">if</span> (retval)
-            goto fork_out;
-        retval = -ENOMEM;
-        p = dup_task_struct(current);
-        retval = copy_creds(p, clone_flags);
-        <span class="hljs-keyword">if</span> (retval)
-            goto bad_fork_cleanup_namespaces; 
-        retval = copy_thread(clone_flags, stack_start, stack_size, p);
-         <span class="hljs-keyword">...</span> <span class="hljs-keyword">...</span> 
-         __this_cpu_inc(process_counts);  
-         <span class="hljs-keyword">...</span> ....
-     }
-    `</pre>
 
-    0号进程会复制一份新的自己作为新进程,接着将kernel_init的入口地址设置到新进程中，接着设置pid的值
-    利用#define **this_cpu_inc(pcp)     **this_cpu_add(pcp, 1)取得新的PID保证不重复
+    retval = security_task_create(clone_flags);
+    if (retval)
+        goto fork_out;
+
+    retval = -ENOMEM;
+
+    p = dup_task_struct(current);
+
+    retval = copy_creds(p, clone_flags);
+
+    if (retval)
+        goto bad_fork_cleanup_namespaces;
+
+
+    retval = copy_thread(clone_flags, stack_start, stack_size, p);
+     ... ... 
+
+
+        __this_cpu_inc(process_counts);
+
+  ... .... 
+
+}
+```
+这里的start_stack对应的值： 
+```
+(gdb) s
+copy_thread(clone_flags=8389876, sp=3245760928, arg=0, p=0x78500000) at arch/x86/kernel/process_32.c.134
+```
+查看kernel_init的地址：
+```
+(gdb) disassemble kernel_mit Duap of assembler code for function kernel_mit:
+0xc17661a0 <+0>: push %ebp
+0xc17661a1 <+1>: mov %esp,%ebp
+0xc17661a3 <+3>: sub $Oxc,’esp
+0xc17661a6 <+6>: cafl 0xc1a4d524 <kernel._init_freeabJe>
+```
+
+0号进程会复制一份新的自己作为新进程,接着将kernel_init的入口地址设置到新进程中，接着设置pid的值利用#define **this_cpu_inc(pcp)     **this_cpu_add(pcp, 1)取得新的PID保证不重复
 
 *   调度过程
-    <pre>`asmlinkage __visible <span class="hljs-keyword">void</span> __<span class="hljs-function">sched <span class="hljs-title">schedule</span><span class="hljs-params">(<span class="hljs-keyword">void</span>)</span>
-    </span>{
-        <span class="hljs-keyword">struct</span> task_struct *tsk = current;
+
+在kernel_init处打上断点，然后查看其堆栈信息： 
+```
+Breakpoint 2, __schedule () at kernel/sched/core.c:2771
+2771 {
+(gdb) bt
+#0 __schedule () at kernel/sched/core.c:2771
+#1 0xc176860e in schedule () at kernel/sched/core.c:2870
+#2 OxclO5d6cc in kthreadd (unused=<value optimized out>) at kernel/kthread.c:498
+#3 0xc176b601 in ?? () at arch/x86/kernel/entry_32.S:311
+#4 0xc105d580 in ?? () at kernel/kthread.c:195
+Backtrace stopped: previous frame inner to this frame (corrupt stack?)
+```
+
+
+
+```
+asmlinkage __visible sched schedule(void)
+    {
+       task_struct *tsk = current;
         sched_submit_work(tsk);
         __schedule();
        }
-    `</pre>
+```
 
-     可见__schedule（）进行了各种调度工作
+可见__schedule（）进行了各种调度工作
 
 *   执行
-    <pre>`static int __ref kernel_init(void *unused)
-    {
-    <span class="hljs-keyword">...</span> <span class="hljs-keyword">...</span>     <span class="hljs-keyword">if</span> (ramdisk_execute_command) {
-         ret = run_init_process(ramdisk_execute_command);
-         <span class="hljs-keyword">if</span> (!ret)
-             <span class="hljs-keyword">return</span> <span class="hljs-number">0</span>;
-             pr_err(<span class="hljs-string">"Failed to execute %s (error %d)\n"</span>,
-                ramdisk_execute_command, ret);
-     }
-     <span class="hljs-keyword">...</span> <span class="hljs-keyword">...</span>    }
 
-    从这里可以很清楚看到它会执行/init，而init就是我们之前编译出来的进程。因此我们可以看到0号进程会调用execute()命令将init作为一个可执行程序运行起来。
+```
+    static int __ref kernel_init(void *unused)
+{
+   ... ... 
+    if (ramdisk_execute_command) {
+        ret = run_init_process(ramdisk_execute_command);
+        if (!ret)
+            return 0;
+            pr_err("Failed to execute %s (error %d)\n",
+               ramdisk_execute_command, ret);
+    }
+    ... ... 
+}
+```
+查看ramdisk_execute_command的值：
+```
+(gdb) p ramdisk_execute_command 
+$1 = Oxc18ecc79 “/init”
+```
+从这里可以很清楚看到它会执行/init，而init就是1号进程。因此我们可以看到0号进程会调用execute()命令将init作为一个可执行程序运行起来。
+
+
+
