@@ -1,3 +1,7 @@
 #!/bin/bash
 echo Hello Linux
-cat >output.txt
+echo -n >output.txt
+while read line
+do
+    echo $line >>output.txt
+done
